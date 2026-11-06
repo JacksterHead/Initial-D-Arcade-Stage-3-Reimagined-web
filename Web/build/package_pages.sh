@@ -1,18 +1,18 @@
 #!/bin/bash
-# Assemble a static site for GitHub Pages (or any static host).
-#   Web/build/package_pages.sh <wasm-build dir> <out dir> --data-url <url of the Native/ folder, ending in />
+# Assemble the static site for GitHub Pages (or any static host): the client, the data index and config.json.
+#   Web/build/package_pages.sh <wasm-build dir> <out dir> [--data-url <url of the Native/ folder, ends in />]
 #
-# GitHub Pages sites are limited to 1 GB and the game data is ~2.8 GB, so the site holds only the client
-# and the data index (manifest.json). config.json tells the client where the data itself lives; the
-# usual choice is this repository's own files on raw.githubusercontent.com, pinned to a pushed commit:
-#   https://raw.githubusercontent.com/<user>/<repo>/<commit sha>/Native/
-# The host of the data must send Access-Control-Allow-Origin (raw.githubusercontent.com does).
+# Default layout (this repository, deployed whole by .github/workflows/static.yml):
+#   <site>/play/        <- this script's output (committed as play/)
+#   <site>/Native/data  <- the game data, already in the repository
+# so config.json says the data is at ../Native/ (resolved against the page, any sub-path works).
+# For a host that cannot hold the 2.8 GB of data, pass --data-url (the host must send
+# Access-Control-Allow-Origin; Range support is optional, see Web/README.md).
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"; repo="$here/../.."
 build="${1:?wasm build dir}"; out="${2:?output dir}"; shift 2
-data=""
+data="../Native/"
 while [ $# -gt 0 ]; do case "$1" in --data-url) data="${2:?}"; shift 2;; *) echo "unknown option $1" >&2; exit 2;; esac; done
-[ -n "$data" ] || { echo "--data-url is required" >&2; exit 2; }
 case "$data" in */) ;; *) data="$data/";; esac
 rm -rf "$out"; "$here/package_web.sh" "$build" "$out" >/dev/null
 python3 -I "$here/../tools/make_manifest.py" "$repo/Native" \

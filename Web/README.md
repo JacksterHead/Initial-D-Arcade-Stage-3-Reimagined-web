@@ -59,26 +59,36 @@ raw more. Prefetch sets are recorded from the client's access log (`make_manifes
 
 ## GitHub Pages
 
-Pages sites are limited to 1 GB and the game data is ~2.8 GB, so the Pages site holds the client and the
-data index only (5.5 MB); `config.json` points the client at the game data, which stays in the repository
-(`Native/data`) and is read from `raw.githubusercontent.com`, pinned to a commit:
+The repository already holds the game data (`Native/data`), and `.github/workflows/static.yml` deploys the
+whole repository as one Pages site, so the browser client is committed as a static folder, **`play/`**, next to
+the data. Its `config.json` points at `../Native/`, relative to the page, so it works under any path:
 
 ```
-Web/build/package_pages.sh build/wasm site \
-  --data-url https://raw.githubusercontent.com/<user>/<repo>/<commit sha>/Native/
-Web/build/publish_pages.sh site            # force-pushes a single commit to the gh-pages branch of origin
+https://<user>.github.io/<repo>/play/        the game (the repository root redirects here)
+https://<user>.github.io/<repo>/Native/data  the files it streams
 ```
 
-Then, once: repository Settings → Pages → Deploy from a branch → `gh-pages` / `(root)`. The site is
-`https://<user>.github.io/<repo>/`; every URL in the client is relative, so the sub-path is fine, and
-HTTPS is what browsers require for the audio engine on a phone.
+Rebuild `play/` after changing anything in `Web/www` or the core (needs the wasm build above):
 
-The data host only has to allow cross-origin reads (`Access-Control-Allow-Origin`). Range support is
-optional: a plain `Range: bytes=a-b` header needs no CORS preflight, and a host that ignores Range or
-fails it makes the client fetch the whole file once and keep it (`tests/rangefs_test.cjs` covers all
-three cases). `raw.githubusercontent.com` is not a CDN and is rate limited, so this suits a personal or
-small-group deployment; for more traffic put `Native/data` on object storage/CDN and change `--data-url`.
-`tools/prefetch/boot.txt` and `menus.txt` are the file lists the client downloads up front.
+```
+Web/build/package_pages.sh build/wasm play
+```
+
+then commit `play/`; the next push to `main` deploys it. Notes:
+
+* Pages' documented limit is 1 GB per site; this repository's deployment was accepted at 2.3 GB, so it is
+  over the documented limit. If GitHub starts refusing it, host `Native/data` elsewhere (below).
+* Only one workflow should deploy Pages. `jekyll-gh-pages.yml` and `static.yml` both do, from the same
+  branch; keep one (`static.yml`, since Jekyll would try to build the whole repository).
+* Data on another host (object storage/CDN, or `raw.githubusercontent.com`): build with
+  `package_pages.sh build/wasm play --data-url https://host/path/Native/`. That host only has to send
+  `Access-Control-Allow-Origin`. Range support is optional: a plain `Range: bytes=a-b` header needs no CORS
+  preflight, and a host that ignores Range or fails it makes the client fetch the whole file once and keep it
+  (`tests/rangefs_test.cjs` covers all three cases). `raw.githubusercontent.com` is not a CDN and is rate limited.
+* HTTPS (which Pages gives you) is what browsers require for the audio engine on a phone.
+* `tools/prefetch/boot.txt` and `menus.txt` are the file lists the client downloads up front.
+* Not tested here: the real `github.io` site (this environment cannot reach it); the layout and Range
+  behaviour were tested against a local server.
 
 **Hosting the data is the owner's decision**: those files are the game's converted assets. The ROM gate
 below does not make them private.
