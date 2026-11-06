@@ -1,6 +1,10 @@
 // Development server for the web client: static files with HTTP Range support.
 //
 //   node Web/tools/serve.mjs --www <dist dir> --data <Native dir> --manifest <manifest.json> [--port 8080]
+//        [--cors 1]          allow cross-origin use (what a raw file host answers), to test a client and its data on different origins
+//        [--preflight 1]     with --cors: also answer CORS preflights (otherwise they are refused, like a host that does not)
+//        [--cors-no-range 1] with --cors: leave the CORS header off ranged responses (the browser then rejects them)
+//        [--ignore-range 1]  answer every Range request with the whole file (a host without Range support)
 //
 // /          -> the built client (see Web/build/package_web.sh)
 // /game/...  -> <Native dir>/data/... only (the lazy file loader's base URL; Range requests)
@@ -16,6 +20,7 @@ const args = Object.fromEntries(process.argv.slice(2).reduce((acc, a, i, all) =>
 const www = path.resolve(args.www ?? 'dist');
 const dataRoot = args.data ? path.resolve(args.data) : null;
 const port = Number(args.port ?? 8080);
+const cors = args.cors === '1', ignoreRange = args['ignore-range'] === '1', preflight = args.preflight === '1';
 const manifest = args.manifest ? path.resolve(args.manifest) : null;
 const types = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8',
@@ -23,7 +28,7 @@ const types = {
 };
 
 // Transfer counters, readable at /__stats: lets tests measure what a client actually downloads.
-const counters = { requests: 0, ranged: 0, gzipped: 0, bodyBytes: 0 };
+const counters = { requests: 0, ranged: 0, gzipped: 0, bodyBytes: 0, preflights: 0 };
 const compressible = new Set(['.idasmesh', '.idastex', '.idasasm', '.dtpk', '.rcl', '.idasdialog', '.json', '.js', '.html', '.wasm']);
 
 function resolve(url) {
@@ -39,6 +44,16 @@ function resolve(url) {
 }
 
 http.createServer((req, res) => {
+  if (cors) {
+    if (!(args['cors-no-range'] === '1' && req.headers.range)) res.setHeader('access-control-allow-origin', '*');
+    res.setHeader('access-control-expose-headers', 'content-length, content-range, accept-ranges');
+    if (req.method === 'OPTIONS') {
+      ++counters.preflights;
+      if (preflight) res.writeHead(204, { 'access-control-allow-headers': 'range', 'access-control-allow-methods': 'GET, HEAD', 'access-control-max-age': '600' });
+      else res.writeHead(405);
+      res.end(); return;
+    }
+  }
   if (req.url === '/__stats') { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(counters)); return; }
   const target = resolve(req.url);
   if (!target || (req.method !== 'GET' && req.method !== 'HEAD')) { res.writeHead(404); res.end(); return; }
@@ -50,7 +65,7 @@ http.createServer((req, res) => {
       'cache-control': target.immutable ? 'public, max-age=31536000, immutable' : 'no-cache',
     };
     let start = 0, end = st.size - 1, status = 200;
-    const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range ?? '');
+    const range = ignoreRange ? null : /^bytes=(\d*)-(\d*)$/.exec(req.headers.range ?? '');
     if (range && (range[1] || range[2])) {
       if (range[1] === '') { start = Math.max(0, st.size - Number(range[2])); }
       else { start = Number(range[1]); if (range[2]) end = Math.min(end, Number(range[2])); }

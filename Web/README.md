@@ -33,7 +33,7 @@ export EMCC=/path/to/emcc
 Web/build/build_wasm.sh  build/wasm -j8        # compile the units (patches are applied first; a failing patch aborts)
 Web/build/link_wasm.sh   build/wasm web        # idas_core.js + idas_core.wasm
 Web/build/package_web.sh build/wasm dist       # www/* + core -> dist/
-python3 -I Web/tools/make_manifest.py Native > manifest.json
+python3 -I Web/tools/make_manifest.py Native --set boot=Web/tools/prefetch/boot.txt --set menus=Web/tools/prefetch/menus.txt > manifest.json
 ```
 
 `link_wasm.sh` links at `-O0` by default because the glue optimizer needs npm packages that are not
@@ -48,13 +48,37 @@ node Web/tools/serve.mjs --www dist --data Native --manifest manifest.json --por
 
 Open `http://localhost:8080/`, choose the disc files, play. Query options: `?stats=1` (overlay),
 `?scale=<factor>` / `?maxlong=<px>` (render size; defaults 0.75 / 1280 on touch devices, 1 / 1920 otherwise), `?touch=1` (force touch controls),
-`?data=<url>` (game data base URL).
+`?data=<url>` (game data base URL, default `game/` next to the page), `?manifest=<url>`. A `config.json` next to
+`index.html` (`{"data": ..., "manifest": ...}`) sets the same two URLs; the dev server has none.
 
 `serve.mjs` is a development server. For hosting, put `dist/` and the converted game data
 (`/game/`, from `Native/data`) behind any static host that supports **HTTP Range requests**, serves
 `/game/` with long-lived caching, and compresses the compressible file types. A race session reads
 ~215 MB of the 2.85 GiB tree; the boot set is ~140 MB raw (~40 MB compressed) and menu to race ~75 MB
 raw more. Prefetch sets are recorded from the client's access log (`make_manifest.py --set boot=list`).
+
+## GitHub Pages
+
+Pages sites are limited to 1 GB and the game data is ~2.8 GB, so the Pages site holds the client and the
+data index only (5.5 MB); `config.json` points the client at the game data, which stays in the repository
+(`Native/data`) and is read from `raw.githubusercontent.com`, pinned to a commit:
+
+```
+Web/build/package_pages.sh build/wasm site \
+  --data-url https://raw.githubusercontent.com/<user>/<repo>/<commit sha>/Native/
+Web/build/publish_pages.sh site            # force-pushes a single commit to the gh-pages branch of origin
+```
+
+Then, once: repository Settings → Pages → Deploy from a branch → `gh-pages` / `(root)`. The site is
+`https://<user>.github.io/<repo>/`; every URL in the client is relative, so the sub-path is fine, and
+HTTPS is what browsers require for the audio engine on a phone.
+
+The data host only has to allow cross-origin reads (`Access-Control-Allow-Origin`). Range support is
+optional: a plain `Range: bytes=a-b` header needs no CORS preflight, and a host that ignores Range or
+fails it makes the client fetch the whole file once and keep it (`tests/rangefs_test.cjs` covers all
+three cases). `raw.githubusercontent.com` is not a CDN and is rate limited, so this suits a personal or
+small-group deployment; for more traffic put `Native/data` on object storage/CDN and change `--data-url`.
+`tools/prefetch/boot.txt` and `menus.txt` are the file lists the client downloads up front.
 
 **Hosting the data is the owner's decision**: those files are the game's converted assets. The ROM gate
 below does not make them private.
@@ -83,6 +107,7 @@ of the same profile are last-writer-wins.
 | `headless_scene.cpp` (native and wasm builds) | scripted sessions; wasm state, frame and audio output match native (tiny libm differences only in a few vertex alpha values) |
 | `render_dump.cjs` + `render.html` | renders captured frames/UI dumps with `renderer.js` in headless Chromium, counts GL calls |
 | `boot_test.cjs` | full client boot against `serve.mjs`: loading, menus, race, stats, audio, access log |
+| `rangefs_test.cjs` | reads a large file from a data server on another origin: Range works / Range fails CORS / Range ignored |
 | `gate_ui_test.cjs`, `romgate_test.mjs` | gate screen and the validation logic against synthetic discs |
 | `touch_test.cjs` | touch layouts and short-tap latching |
 | `persist_test.cjs` | IndexedDB save persistence across reloads |

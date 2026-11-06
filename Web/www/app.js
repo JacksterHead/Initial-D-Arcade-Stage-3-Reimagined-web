@@ -1,5 +1,7 @@
 // Main-thread shell: owns the page, forwards input to the game worker and shows load/stat overlays.
-// URL options: ?data=<base url of /data, default /game/>  ?scale=<0.25..1>  ?maxlong=<px>  ?stats=1
+// URL options: ?data=<base url of Native/, default game/>  ?manifest=<url>  ?scale=<factor>  ?maxlong=<px>  ?stats=1
+// Optional config.json beside index.html: {"data": <base url>, "manifest": <url>} (relative URLs resolve against the page).
+// A static host (GitHub Pages) uses it to keep the client and the large game data on different origins.
 import { PAD } from './abi.js';
 import { validateDisc } from './romgate.js';
 import { initTouch } from './touch.js';
@@ -7,7 +9,8 @@ import { AudioOutput } from './audio.js';
 const audio = new AudioOutput();
 
 const params = new URLSearchParams(location.search);
-const dataBase = new URL(params.get('data') ?? '/game/', location.href).href;
+const configPromise = fetch(new URL('config.json', location.href), { cache: 'no-cache' })
+  .then((r) => (r.ok ? r.json() : {})).catch(() => ({}));   // absent on the dev server: defaults below
 const coarse = matchMedia('(pointer: coarse)').matches;
 const renderScale = Number(params.get('scale') ?? (coarse ? 0.75 : 1));
 const maxLong = Number(params.get('maxlong') ?? (coarse ? 1280 : 1920));
@@ -124,7 +127,10 @@ function fail(text) {
   errorBox.textContent = text;
 }
 
-export function startGame() {
+export async function startGame() {
+  const config = await configPromise;
+  const dataBase = new URL(params.get('data') ?? config.data ?? 'game/', location.href).href;
+  const manifestUrl = new URL(params.get('manifest') ?? config.manifest ?? new URL('manifest.json', dataBase).href, location.href).href;
   const offscreen = canvas.transferControlToOffscreen();
   worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
   window.__worker = worker;
@@ -149,7 +155,7 @@ export function startGame() {
   };
   audio.start(worker);                         // before the core starts, so the port is in place for the first sound
   const s = sizes();
-  worker.postMessage({ type: 'start', canvas: offscreen, manifestUrl: new URL('manifest.json', dataBase).href, dataBase,
+  worker.postMessage({ type: 'start', canvas: offscreen, manifestUrl, dataBase,
     width: s.width, height: s.height, canvasWidth: s.canvasWidth, canvasHeight: s.canvasHeight,
     preserveDrawingBuffer: params.has('preserve') }, [offscreen]);
   const loop = () => {

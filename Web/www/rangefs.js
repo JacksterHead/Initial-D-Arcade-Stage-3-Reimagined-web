@@ -31,8 +31,9 @@ export class RangeFiles {
     this.lru = new Map();           // "fileIndex:chunk" -> true, oldest first
     this.files = [];                // index -> { url, size, chunks: Map(chunk -> Uint8Array) }
     this.byPath = new Map();        // path inside the mount -> file
-    this.stats = { requests: 0, bytes: 0, blockedMs: 0, evictions: 0, prefetched: 0 };
+    this.stats = { requests: 0, bytes: 0, blockedMs: 0, evictions: 0, prefetched: 0, rangeIgnored: 0, rangeRefused: 0 };
     this.accessLog = [];            // manifest paths in order of first read (used to build prefetch lists)
+    this.noRange = false;           // set once a Range request has been refused by the data host
   }
 
   /** Create every manifest entry under `mountPoint` (e.g. '/idas'): {"data/a/b.bin": size, ...}. */
@@ -96,17 +97,37 @@ export class RangeFiles {
   #fetchBlocking(file, chunk) {
     const [from, to] = this.#chunkSpan(file, chunk);
     const t0 = performance.now();
-    const xhr = new XMLHttpRequest();
-    xhr.open('GET', file.url, false);
-    if (to - from !== file.size) xhr.setRequestHeader('Range', `bytes=${from}-${to - 1}`);
-    xhr.responseType = 'arraybuffer';          // allowed for sync XHR in workers
-    xhr.send(null);
+    let xhr;
+    for (;;) {
+      const useRange = to - from !== file.size && !this.noRange;
+      xhr = new XMLHttpRequest();
+      xhr.open('GET', file.url, false);
+      if (useRange) xhr.setRequestHeader('Range', `bytes=${from}-${to - 1}`);
+      xhr.responseType = 'arraybuffer';        // allowed for sync XHR in workers
+      try { xhr.send(null); break; } catch (e) {
+        // Data on another origin: a Range header makes the browser send a CORS preflight, and a host that
+        // does not answer it (static file hosts often do not) makes the request fail. Ask for the whole
+        // file instead (a plain GET needs no preflight) and keep it; do not try Range again.
+        if (!useRange) throw e;
+        this.noRange = true; ++this.stats.rangeRefused;
+      }
+    }
     this.stats.blockedMs += performance.now() - t0;
     ++this.stats.requests;
     if (!(xhr.status === 200 || xhr.status === 206)) throw new Error(`HTTP ${xhr.status} for ${file.url}`);
     let bytes = new Uint8Array(xhr.response);
-    // A server that ignores Range answers 200 with the whole body: take our slice of it.
-    if (xhr.status === 200 && bytes.length === file.size && to - from !== file.size) bytes = bytes.subarray(from, to);
+    // A server that ignores Range answers 200 with the whole body. Keep every chunk of it, so the file
+    // is downloaded once rather than once per chunk, and return the one that was asked for.
+    if (xhr.status === 200 && bytes.length === file.size && to - from !== file.size) {
+      ++this.stats.rangeIgnored;
+      const whole = bytes;
+      bytes = whole.slice(from, to);
+      for (let c = 0; c * this.chunkSize < file.size; ++c) {
+        if (c === chunk || file.chunks.has(c)) continue;
+        const [a, b] = this.#chunkSpan(file, c);
+        this.#install(file, c, whole.slice(a, b));
+      }
+    }
     if (bytes.length !== to - from) throw new Error(`short response (${bytes.length}/${to - from}) for ${file.url}`);
     this.stats.bytes += bytes.length;
     return bytes;

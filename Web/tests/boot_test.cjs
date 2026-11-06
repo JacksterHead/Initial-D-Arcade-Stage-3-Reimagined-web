@@ -1,5 +1,6 @@
 // Boots the packaged web client in headless Chromium against a local server and drives it.
 //   node boot_test.cjs <dist dir> <Native dir> <manifest.json> <out dir> [script]
+// Env: QUERY=<page query>; BOOT_URL=<page url> opens that (already running) site instead of starting a server.
 // script (optional): comma list of steps: wait:<ms> key:<code>[:<holdMs>] shot:<name> stats log:<label>
 const { chromium } = require('playwright');
 const { spawn } = require('child_process');
@@ -8,7 +9,7 @@ const [dist, native, manifest, outDir, script = 'wait:3000,shot:boot'] = process
 if (!outDir) { console.error('usage: boot_test.cjs dist native manifest outDir [script]'); process.exit(2); }
 fs.mkdirSync(outDir, { recursive: true });
 const port = 20000 + Math.floor(Math.random() * 20000);
-const server = spawn('node', [path.join(__dirname, '../tools/serve.mjs'), '--www', dist, '--data', native, '--manifest', manifest, '--port', String(port)], { stdio: 'inherit' });
+const server = process.env.BOOT_URL ? { kill() {} } : spawn('node', [path.join(__dirname, '../tools/serve.mjs'), '--www', dist, '--data', native, '--manifest', manifest, '--port', String(port)], { stdio: 'inherit' });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 (async () => {
   await sleep(600);
@@ -21,7 +22,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   // module (a real GDS-0033 dump is not available here) and picks a dummy file.
   await page.route('**/romgate.js', (route) => route.fulfill({ contentType: 'text/javascript',
     body: 'export async function validateDisc(){ return { verified: true, message: "test stub", format: "stub" }; }' }));
-  await page.goto(`http://127.0.0.1:${port}/?${process.env.QUERY ?? 'stats=1&maxlong=1280'}`);
+  await page.goto(`${process.env.BOOT_URL ?? `http://127.0.0.1:${port}/`}?${process.env.QUERY ?? 'stats=1&maxlong=1280'}`);
   await page.setInputFiles('#files', { name: 'stub.bin', mimeType: 'application/octet-stream', buffer: Buffer.from('x') });
   try {
     await page.waitForFunction(() => window.__ready || window.__error, null, { timeout: 280000 });
