@@ -103,7 +103,12 @@ addEventListener('contextmenu', (e) => e.preventDefault());
 // ---- sizing ----------------------------------------------------------------------------------
 function sizes() {
   const dpr = Math.min(devicePixelRatio || 1, 3);
-  const canvasWidth = Math.max(2, Math.round(innerWidth * dpr)), canvasHeight = Math.max(2, Math.round(innerHeight * dpr));
+  // Size the drawing surface from the canvas's real on-screen box, not from innerWidth/innerHeight. On phones
+  // the two disagree while the browser toolbars are showing or sliding away (the fixed canvas follows the
+  // layout viewport), and any difference between the box and the frame drawn into it stretches the picture.
+  const box = canvas.getBoundingClientRect();
+  const cssWidth = box.width || innerWidth, cssHeight = box.height || innerHeight;
+  const canvasWidth = Math.max(2, Math.round(cssWidth * dpr)), canvasHeight = Math.max(2, Math.round(cssHeight * dpr));
   let w = canvasWidth * renderScale, h = canvasHeight * renderScale;
   const long = Math.max(w, h);
   if (long > maxLong) { w *= maxLong / long; h *= maxLong / long; }
@@ -111,10 +116,12 @@ function sizes() {
   return { canvasWidth, canvasHeight, width: even(w), height: even(h) };
 }
 let resizeTimer = 0;
-addEventListener('resize', () => {
+const queueResize = () => {
   clearTimeout(resizeTimer);
   resizeTimer = setTimeout(() => worker?.postMessage({ type: 'resize', ...sizes() }), 120);
-});
+};
+addEventListener('resize', queueResize);
+new ResizeObserver(queueResize).observe(canvas);      // the box also changes with toolbars, rotation, fullscreen
 
 // ---- worker ----------------------------------------------------------------------------------
 function setPhase(text, progress) {
