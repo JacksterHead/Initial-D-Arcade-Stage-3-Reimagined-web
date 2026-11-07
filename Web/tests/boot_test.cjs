@@ -1,6 +1,6 @@
 // Boots the packaged web client in headless Chromium against a local server and drives it.
 //   node boot_test.cjs <dist dir> <Native dir> <manifest.json> <out dir> [script]
-// Env: QUERY=<page query>; BOOT_URL=<page url> opens that (already running) site instead of starting a server.
+// Env: QUERY=<page query>; VIEWPORT=<w>x<h> (default 1280x720); EXTRA_CSS=<css injected after load, e.g. to force a canvas box that differs from the window); BOOT_URL=<page url> opens that (already running) site instead of starting a server.
 // script (optional): comma list of steps: wait:<ms> key:<code>[:<holdMs>] shot:<name> stats log:<label>
 const { chromium } = require('playwright');
 const { spawn } = require('child_process');
@@ -14,7 +14,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 (async () => {
   await sleep(600);
   const browser = await chromium.launch({ args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist', '--autoplay-policy=no-user-gesture-required'] });
-  const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
+  const [vw, vh] = (process.env.VIEWPORT ?? '1280x720').split('x').map(Number);
+  const page = await browser.newPage({ viewport: { width: vw, height: vh } });
   page.on('console', (m) => console.log('[page]', m.text().slice(0, 300)));
   page.on('pageerror', (e) => console.log('[pageerror]', e.message));
   const t0 = Date.now();
@@ -23,6 +24,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await page.route('**/romgate.js', (route) => route.fulfill({ contentType: 'text/javascript',
     body: 'export async function validateDisc(){ return { verified: true, message: "test stub", format: "stub" }; }' }));
   await page.goto(`${process.env.BOOT_URL ?? `http://127.0.0.1:${port}/`}?${process.env.QUERY ?? 'stats=1&maxlong=1280'}`);
+  if (process.env.EXTRA_CSS) await page.addStyleTag({ content: process.env.EXTRA_CSS });
   await page.setInputFiles('#files', { name: 'stub.bin', mimeType: 'application/octet-stream', buffer: Buffer.from('x') });
   try {
     await page.waitForFunction(() => window.__ready || window.__error, null, { timeout: 280000 });
