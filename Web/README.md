@@ -7,7 +7,9 @@ needs are `patches/*.patch`, applied to a build-time copy).
 ```
  browser tab
  ├─ main thread   app.js  input (keyboard / gamepad / touch), ROM gate, audio context, UI shell
+ │                mp-ui.js + mp-link.js  versus panel and the WebRTC connection to the other player
  ├─ worker        worker.js  the whole game: core (wasm) + WebGL2 renderer on an OffscreenCanvas
+ │                mp-session.js  online session (lobby, race pump, results, records)
  │                rangefs.js  lazily fetched, read-only game data (HTTP Range + prefetch)
  └─ AudioWorklet  audio-worklet.js  jitter buffer fed with the core's own 44.1 kHz mixer output
 ```
@@ -35,6 +37,9 @@ Web/build/link_wasm.sh   build/wasm web        # idas_core.js + idas_core.wasm
 Web/build/package_web.sh build/wasm dist       # www/* + core -> dist/
 python3 -I Web/tools/make_manifest.py Native --set boot=Web/tools/prefetch/boot.txt --set menus=Web/tools/prefetch/menus.txt > manifest.json
 ```
+
+For the Node tests of online play also link `Web/build/link_wasm.sh build/wasm node-core` (the same core as an ES module
+that can be instantiated several times in one process).
 
 `link_wasm.sh` links at `-O0` by default because the glue optimizer needs npm packages that are not
 always installed. Run Binaryen's `wasm-opt -O2` over `idas_core.wasm` for a release build (not done or
@@ -101,6 +106,37 @@ in the browser and not uploaded; nothing is remembered between visits. As on des
 inside the client the player runs, so it is not a technical barrier. There is deliberately no flag or
 query parameter that skips it; the automated tests replace the gate module inside Playwright only.
 
+## Online play (head-to-head versus)
+
+Two browser players race each other. Press **VERSUS** (top left, on the menus) and choose:
+
+1. **Host a race**: the page shows a pairing code. Send it to the other player in any chat app.
+2. **Join a race**: the other player pastes that code, and sends back the reply code the page shows.
+3. The host pastes the reply code and presses **Connect**. Both browsers connect directly; no server is involved.
+
+In the lobby each player picks a car (their own saved cars and the stock cars) and transmission, the host picks
+course, direction, boost and collisions, the guest presses **I am ready**, the host starts. There is a text chat in
+the lobby. The race uses the game's own VS screens, HUD, countdown and original result screens; afterwards both
+players return to the lobby.
+
+* **How it stays in sync.** Both browsers simulate the whole race from the exchanged controls (the core's
+  "input authority" mode: the packets carry only controls, the core rolls back and replays when a late packet
+  differs from its prediction, and a lost packet is repaired by the next one). The host announces the result and
+  the guest accepts it only if its own simulation agrees. The two sides must run the identical core, so the
+  lobby refuses a different build (the build id is a hash of `idas_core.wasm`, in `build.json`).
+* **Records.** Battle record per car (battles, wins, level, streak) and the last 50 races are kept on the device
+  (`/saves/web-online/records.json`, IndexedDB). The progression arithmetic and the tuning-point reward are the
+  core's own, the same calls the desktop game uses.
+* **Network.** The connection is direct UDP (WebRTC data channels). Public STUN servers (Google, Cloudflare) are
+  used only to learn each side's public address. There is **no relay server**, so some networks cannot connect:
+  symmetric NAT, strict corporate firewalls, some mobile carriers. Two devices on the same Wi-Fi work without
+  internet access. Both players see the other's IP address (inherent to peer-to-peer); nothing goes to a server of this project.
+* **Keep the tab in front.** A hidden tab stops the game loop; the other player is disconnected after ~15 s.
+* **Compared with the desktop game.** Browser to browser only (the desktop game uses Epic Online Services, which
+  has no browser client). The host's course choice stands, with no random draw between two picks. No quick match,
+  room list, player directory, sanctions, imported course packs, or crash-safe result journal (a result is written
+  once it is settled). Pairing codes are exchanged by the players, so there is nothing to moderate at a server.
+
 ## Controls
 
 Keyboard and gamepad follow the desktop mapping. Touch: left-hand steering zone (drag from where you
@@ -118,6 +154,10 @@ of the same profile are last-writer-wins.
 | `render_dump.cjs` + `render.html` | renders captured frames/UI dumps with `renderer.js` in headless Chromium, counts GL calls |
 | `boot_test.cjs` | full client boot against `serve.mjs`: loading, menus, race, stats, audio, access log |
 | `rangefs_test.cjs` | reads a large file from a data server on another origin: Range works / Range fails CORS / Range ignored |
+| `mp_core_test.mjs` | two cores (host/guest, Node) race over in-memory packets: same winner and finish times, with packet loss and delay; result and record calls |
+| `mp_session_test.mjs` | the full online flow with two cores and two sessions: lobby, chat, ready rules, race with loss and latency, result, records, back to the lobby, leaving |
+| `mp_signal_test.mjs` | pairing-code encoding: round trips, damaged/truncated codes rejected, code length |
+| `mp_browser_test.cjs` | two real browser profiles pair through real WebRTC, chat, pick cars, race, leave (`MP_RESULTS=1`: race to the time-up result and back to the lobby) |
 | `gate_ui_test.cjs`, `romgate_test.mjs` | gate screen and the validation logic against synthetic discs |
 | `touch_test.cjs` | touch layouts and short-tap latching |
 | `persist_test.cjs` | IndexedDB save persistence across reloads |
@@ -135,12 +175,12 @@ cache hits, cached geometry, slabs).
 
 ## Limitations / not done
 
-* **Online play is not implemented.** The core's multiplayer bridge is transport independent (snapshot
-  and `Idas3MultiplayerAuthorityPacket/Receive` functions), but rooms, quick match, chat, sanctions, the
-  player directory and the online menus live in the Unity layer (`Assets/Scripts/Multiplayer`, built on
-  Epic Online Services P2P, a TCP transport and an HTTP directory), not in the core. A web version needs
-  those flows reimplemented in JS and a browser-reachable relay (WebSocket/WebRTC); that means running a
-  server and accounts/moderation policy, which is a product decision.
+* **Online play is browser to browser, head to head only** (see above). Not done: playing against the desktop
+  game, quick match / room list / player directory / online records server / sanctions (these need a server and
+  a moderation policy, which is a product decision), a relay for networks that block direct connections, imported
+  course packs. Tested here: two cores over simulated lossy links, and two real browser instances over WebRTC on
+  one machine. **Not tested:** two different devices or networks, NAT traversal over the internet, Firefox/Safari
+  data channels with these codes, phones.
 * Not tested on real hardware: phone performance and memory pressure, iOS audio unlock, Safari's
   OffscreenCanvas WebGL2, acceptance of a real GDS-0033 dump.
 * The wasm is unoptimized (`-O0` link, no `wasm-opt`).

@@ -6,6 +6,7 @@ import { PAD } from './abi.js';
 import { validateDisc } from './romgate.js';
 import { initTouch } from './touch.js';
 import { AudioOutput } from './audio.js';
+import { initVersus } from './mp-ui.js';
 const audio = new AudioOutput();
 
 const params = new URLSearchParams(location.search);
@@ -43,7 +44,7 @@ export const inputSources = sources;
 // Presses are latched until a message carrying them has been sent: a tap whose press and release both land
 // between two main-thread frames would otherwise never be seen by the game.
 const latch = { keys: new Uint32Array(8), buttons: 0 };
-let worker = null, dirty = true;
+let worker = null, dirty = true, versus = null;
 const touch = initTouch({ root: document.getElementById('touch'), sources, latch, markDirty: () => { dirty = true; } });
 // Show the on-screen controls on touch devices from the start, and anywhere else on the first touch.
 if (coarse || params.has('touch')) touch.show();
@@ -79,6 +80,7 @@ function pollGamepad() {
 
 // ---- keyboard --------------------------------------------------------------------------------
 function key(event, down) {
+  if (versus?.capturesKeys(event)) return;             // typing in the versus panel (names, codes, chat) is not game input
   const vk = VK[event.code];
   if (vk === undefined) return;
   if (event.metaKey || (event.ctrlKey && event.code !== 'ControlLeft' && event.code !== 'ControlRight')) return;
@@ -145,9 +147,10 @@ export async function startGame() {
   worker.onmessage = (event) => {
     const m = event.data;
     if (m.type === 'phase') setPhase(m.text, m.progress);
-    else if (m.type === 'ready') { overlay.classList.add('hidden'); window.__ready = true; sndButton.classList.add('available'); }
+    else if (m.type === 'ready') { overlay.classList.add('hidden'); window.__ready = true; sndButton.classList.add('available'); versus?.setReady(); }
+    else if (m.type.startsWith('mp-')) versus?.onWorkerMessage(m);
     else if (m.type === 'saves') window.__saves = m.files;
-    else if (m.type === 'mode') { touch.setDriving(m.driving); window.__mode = m; }
+    else if (m.type === 'mode') { touch.setDriving(m.driving); window.__mode = m; versus?.setDriving(m.driving); }
     else if (m.type === 'error') { window.__error = m.message; fail(m.message); }
     else if (m.type === 'stats') {
       window.__stats = m;
@@ -160,6 +163,10 @@ export async function startGame() {
       }
     }
   };
+  versus = initVersus({
+    worker,
+    getBuildId: () => fetch(new URL('build.json', location.href), { cache: 'no-cache' }).then((r) => (r.ok ? r.json() : { id: 'dev' })).then((j) => String(j.id)).catch(() => 'dev'),
+  });
   audio.start(worker);                         // before the core starts, so the port is in place for the first sound
   const s = sizes();
   worker.postMessage({ type: 'start', canvas: offscreen, manifestUrl, dataBase,
@@ -178,11 +185,19 @@ export async function startGame() {
   requestAnimationFrame(loop);
 }
 
+// Online result screen: taps and clicks on the canvas pick the original menu's buttons (the art lives in the core).
+addEventListener('pointerdown', (e) => {
+  if (!versus?.resultsActive || e.target.closest?.('#versus, #vsChip, #snd, #fs')) return;
+  const box = canvas.getBoundingClientRect();
+  if (!box.width || !box.height) return;
+  worker?.postMessage({ type: 'mp-pointer', u: (e.clientX - box.left) / box.width, v: (e.clientY - box.top) / box.height, click: true });
+}, { capture: true, passive: true });
+
 // Sound toggle (also M).
 const sndButton = document.getElementById('snd');
 const showSound = () => { sndButton.textContent = audio.muted ? 'Sound off' : 'Sound on'; };
 sndButton.addEventListener('click', () => { audio.setMuted(!audio.muted); showSound(); });
-addEventListener('keydown', (e) => { if (e.code === 'KeyM' && !e.repeat) { audio.setMuted(!audio.muted); showSound(); } });
+addEventListener('keydown', (e) => { if (e.code === 'KeyM' && !e.repeat && !versus?.capturesKeys(e)) { audio.setMuted(!audio.muted); showSound(); } });
 showSound();
 if (coarse || params.has('touch')) document.body.classList.add('touchui');
 
@@ -198,7 +213,7 @@ if (root.requestFullscreen && (coarse || params.has('touch'))) {
 }
 
 addEventListener('keydown', (e) => {
-  if (e.code === 'Backquote' && e.shiftKey) statsBox.style.display = statsBox.style.display === 'block' ? 'none' : 'block';
+  if (e.code === 'Backquote' && e.shiftKey && !versus?.capturesKeys(e)) statsBox.style.display = statsBox.style.display === 'block' ? 'none' : 'block';
 });
 if (params.has('stats')) statsBox.style.display = 'block';
 // ---- GDS-0033 check ---------------------------------------------------------------------------

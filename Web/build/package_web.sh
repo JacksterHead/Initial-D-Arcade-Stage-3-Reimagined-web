@@ -8,4 +8,6 @@ for f in idas_core.js idas_core.wasm; do [ -f "$build/$f" ] || { echo "missing $
 mkdir -p "$out"
 cp "$here"/../www/*.js "$here"/../www/*.html "$here"/../www/*.webmanifest "$out"/
 cp "$build/idas_core.js" "$build/idas_core.wasm" "$out"/
+# Online races need both players to run the identical simulation: the build id is the core binary's hash.
+printf '{"id":"%s"}\n' "$(sha256sum "$build/idas_core.wasm" | cut -c1-16)" > "$out/build.json"
 echo "packaged $(ls "$out" | wc -l) files into $out"
