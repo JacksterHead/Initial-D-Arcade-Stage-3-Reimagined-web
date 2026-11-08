@@ -37,5 +37,15 @@ case "$mode" in
       -sFILESYSTEM=1 -lidbfs.js -sEXIT_RUNTIME=0 \
       $(ls "$out"/obj/*.o | grep -v headless_scene) -o "$out/idas_core.js"
     echo "linked $out/idas_core.js" ;;
+  node-core)
+    # The same exports as `web`, loadable from Node as an ES module (real filesystem via NODERAWFS). Every
+    # instantiation has its own memory and its own copy of the core's global state, so a test can run two
+    # games (host and guest) in one process.
+    "$emcc" $linkopt $common -sENVIRONMENT=node -sMODULARIZE=1 -sEXPORT_ES6=1 -sEXPORT_NAME=IdasCore -sNODERAWFS=1 \
+      -sEXPORTED_FUNCTIONS="$list" \
+      -sEXPORTED_RUNTIME_METHODS="['HEAPU8','HEAPU32','HEAPF32','HEAP32','UTF8ToString','stringToUTF8','lengthBytesUTF8','getValue','setValue']" \
+      -sEXIT_RUNTIME=0 \
+      $(ls "$out"/obj/*.o | grep -v headless_scene) -o "$out/idas_core_node.mjs"
+    echo "linked $out/idas_core_node.mjs" ;;
   *) echo "unknown mode $mode" >&2; exit 2 ;;
 esac
