@@ -108,11 +108,22 @@ query parameter that skips it; the automated tests replace the gate module insid
 
 ## Online play (head-to-head versus)
 
-Two browser players race each other. Press **VERSUS** (top left, on the menus) and choose:
+Two browser players race each other. Press **VERSUS** (top left, on the menus):
 
-1. **Host a race**: the page shows a pairing code. Send it to the other player in any chat app.
-2. **Join a race**: the other player pastes that code, and sends back the reply code the page shows.
-3. The host pastes the reply code and presses **Connect**. Both browsers connect directly; no server is involved.
+1. **Host a race**: the page makes an invitation **link**. Send it to the other player in any chat app and keep the page open.
+2. The other player **opens the link**. The game loads, the join screen comes up with the link filled in, they check
+   their name and press **Join**. Both browsers connect and meet in the lobby. Nobody copies a reply code.
+
+The link looks like `https://<site>/play/#join=<26 random characters>`. The part after `#` is never sent to the
+site that serves the game; it names a private mailbox room (below). A guest who already has the game open can paste
+the link into the join screen (or into the address bar of that tab). An invitation is good for one guest and for
+15 minutes while the host's page stays open; a second guest is told the seat is taken, and a cancelled
+invitation says so.
+
+**If the link does not work**, the host's page and the join screen each have the manual way, which needs nothing
+but a chat app: the host sends a **pairing code**, the guest pastes it and sends back a **reply code**, the host
+pastes that and presses **Connect**. The host's page opens that section by itself when the mailbox cannot be
+reached, and the join box accepts either a link or a code.
 
 In the lobby each player picks a car (their own saved cars and the stock cars) and transmission, the host picks
 course, direction, boost and collisions, the guest presses **I am ready**, the host starts. There is a text chat in
@@ -127,15 +138,29 @@ players return to the lobby.
 * **Records.** Battle record per car (battles, wins, level, streak) and the last 50 races are kept on the device
   (`/saves/web-online/records.json`, IndexedDB). The progression arithmetic and the tuning-point reward are the
   core's own, the same calls the desktop game uses.
+* **What the link needs (the mailbox).** A browser cannot find another browser on its own, so the two pages
+  exchange their connection details (the pairing and reply codes, which the link flow sends automatically)
+  through a tiny public mailbox: a topic named after the random room on **[ntfy.sh](https://ntfy.sh)**, a free
+  public publish/subscribe service (`POST` a message, read it back as a server-sent-event stream). Only the
+  pairing codes pass through it, each a few hundred bytes, and they are dropped after ~12 hours; the race itself
+  never touches it. The room name has 130 random bits, so it cannot be guessed, but the codes contain
+  the players' network addresses, so anyone who has the link (or the service's operator) can read them; that is
+  the same thing the codes reveal when pasted in a chat. ntfy.sh is a third party with its own rate limits and
+  terms, and it is the one outside dependency of the link flow. To use another mailbox, set
+  `"signal": "https://your-server"` in `config.json` (`package_pages.sh ... --signal-url <url>`), or open the page
+  with `?signal=<url>`; `?signal=off` switches links off and leaves the codes. Any
+  ntfy-compatible server works, and `Web/tools/signal-relay.mjs` is a ~100-line one you can run yourself
+  (`node Web/tools/signal-relay.mjs --port 8787`, behind HTTPS for an HTTPS page; it keeps messages in memory
+  for 12 hours and rate limits each address; used by the tests).
 * **Network.** The connection is direct UDP (WebRTC data channels). Public STUN servers (Google, Cloudflare) are
-  used only to learn each side's public address. There is **no relay server**, so some networks cannot connect:
+  used only to learn each side's public address. There is **no relay for the game traffic**, so some networks cannot connect:
   symmetric NAT, strict corporate firewalls, some mobile carriers. Two devices on the same Wi-Fi work without
-  internet access. Both players see the other's IP address (inherent to peer-to-peer); nothing goes to a server of this project.
+  internet access (pairing then uses the codes, since the link needs the mailbox). Both players see the other's IP address (inherent to peer-to-peer); nothing goes to a server of this project.
 * **Keep the tab in front.** A hidden tab stops the game loop; the other player is disconnected after ~15 s.
 * **Compared with the desktop game.** Browser to browser only (the desktop game uses Epic Online Services, which
   has no browser client). The host's course choice stands, with no random draw between two picks. No quick match,
   room list, player directory, sanctions, imported course packs, or crash-safe result journal (a result is written
-  once it is settled). Pairing codes are exchanged by the players, so there is nothing to moderate at a server.
+  once it is settled). The mailbox carries only pairing messages, so there is nothing to moderate at a server.
 
 ## Controls
 
@@ -157,7 +182,9 @@ of the same profile are last-writer-wins.
 | `mp_core_test.mjs` | two cores (host/guest, Node) race over in-memory packets: same winner and finish times, with packet loss and delay; result and record calls |
 | `mp_session_test.mjs` | the full online flow with two cores and two sessions: lobby, chat, ready rules, race with loss and latency, result, records, back to the lobby, leaving |
 | `mp_signal_test.mjs` | pairing-code encoding: round trips, damaged/truncated codes rejected, code length |
-| `mp_browser_test.cjs` | two real browser profiles pair through real WebRTC, chat, pick cars, race, leave (`MP_RESULTS=1`: race to the time-up result and back to the lobby) |
+| `mp_mailbox_test.mjs` | the invitation protocol against the local relay: link and room-name handling, host and guest meeting in either order (history replay), a second guest, a cancelled or unknown room, a damaged reply not blocking a good one, an unreachable service, the relay's rate limit |
+| `mp_link_browser_test.cjs` | the single link in two real browser profiles against the local relay: opened in a fresh tab and pasted into an open one, cancelled / unknown / taken invitations, the mailbox going away (clear message, codes still pair), `?signal=off` (`MP_VIEWPORT=844x390 MP_TOUCH=1`: phone landscape) |
+| `mp_browser_test.cjs` | two real browser profiles pair with codes through real WebRTC, chat, pick cars, race, leave (`MP_RESULTS=1`: race to the time-up result and back to the lobby) |
 | `gate_ui_test.cjs`, `romgate_test.mjs` | gate screen and the validation logic against synthetic discs |
 | `touch_test.cjs` | touch layouts and short-tap latching |
 | `persist_test.cjs` | IndexedDB save persistence across reloads |
@@ -179,8 +206,10 @@ cache hits, cached geometry, slabs).
   game, quick match / room list / player directory / online records server / sanctions (these need a server and
   a moderation policy, which is a product decision), a relay for networks that block direct connections, imported
   course packs. Tested here: two cores over simulated lossy links, and two real browser instances over WebRTC on
-  one machine. **Not tested:** two different devices or networks, NAT traversal over the internet, Firefox/Safari
-  data channels with these codes, phones.
+  one machine, with the invitation link going through a local copy of the mailbox. **Not tested:** the public
+  ntfy.sh itself (this environment cannot reach it, so its cross-origin headers and limits are taken from its
+  documentation and source), two different devices or networks, NAT traversal over the internet, Firefox/Safari data
+  channels with these codes, phones.
 * Not tested on real hardware: phone performance and memory pressure, iOS audio unlock, Safari's
   OffscreenCanvas WebGL2, acceptance of a real GDS-0033 dump.
 * The wasm is unoptimized (`-O0` link, no `wasm-opt`).

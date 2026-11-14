@@ -1,9 +1,10 @@
-// The "Versus" panel: pairing by code, the lobby (car, course, ready, chat, records) and the in-race chip.
+// The "Versus" panel: pairing by one link (or by codes), the lobby (car, course, ready, chat, records) and the in-race chip.
 // It owns the WebRTC link (main thread only) and talks to the session in the game worker by postMessage:
 //   worker -> here  mp-send {data, reliable}   mp-view {view}   mp-ended {reason}
 //   here -> worker  mp-open  mp-link  mp-data  mp-do  mp-close  blocked
 // All text shown to the player that came from the other side is inserted with textContent, never as HTML.
 import { MpLink } from './mp-link.js';
+import { Mailbox, hostInvite, guestJoin, newRoom, inviteUrl, roomFrom, normaliseBase, DEFAULT_SIGNAL } from './mp-mailbox.js';
 import { COURSES, CAR_NAMES, directionLabel } from './mp-session.js';
 
 const NAME_KEY = 'idas-web-name';
@@ -77,9 +78,12 @@ const safeGet = (k) => { try { return localStorage.getItem(k); } catch { return 
 const safeSet = (k, v) => { try { localStorage.setItem(k, v); } catch { /* private mode */ } };
 
 /**
- * @param {{worker: Worker, getBuildId: () => Promise<string>, container?: HTMLElement}} o
+ * @param {{worker: Worker, getBuildId: () => Promise<string>, container?: HTMLElement, signal?: string}} o   signal: mailbox server for the one-link pairing
  */
-export function initVersus({ worker, getBuildId, container = document.body }) {
+export function initVersus({ worker, getBuildId, container = document.body, signal = DEFAULT_SIGNAL }) {
+  let signalBase = DEFAULT_SIGNAL;                    // null = invitations switched off (?signal=off): pairing codes only
+  if (String(signal).toLowerCase() === 'off') signalBase = null;
+  else { try { signalBase = normaliseBase(signal); } catch { /* keep the default */ } }
   document.head.append(el('style', { textContent: css }));
 
   // ---- markup (built once; updates only touch text/values so typing and focus survive) ---------
@@ -97,25 +101,31 @@ export function initVersus({ worker, getBuildId, container = document.body }) {
   const home = section('home',
     el('label', { textContent: 'Your name', htmlFor: 'vsName' }), $.name,
     row(btn('vsHost', 'Host a race'), btn('vsJoin', 'Join a race', 'alt')),
-    p('Two players, one race. There is no server: the host creates a code, the other player sends back a reply code, and the two browsers connect directly. You need the same version of the game, and a network that allows direct connections.', 'note'),
+    p('Two players, one race. The host gets a link to send; the other player opens it and the two browsers connect directly (the link only passes two short pairing codes through a public mailbox). You both need the same version of the game and a network that allows direct connections.', 'note'),
     el('h3', { textContent: 'Your records' }), field('vsRecords', 'div', { className: 'hist' }));
 
   const hostSec = section('host',
-    p('1. Send this code to the other player:'),
-    field('vsHostCode', 'textarea', { readOnly: true, spellcheck: false }),
-    row(btn('vsCopyHost', 'Copy', 'alt'), btn('vsShareHost', 'Share', 'alt')),
-    p('2. Paste the reply code they send back:'),
-    field('vsReply', 'textarea', { spellcheck: false, autocomplete: 'off', placeholder: 'Reply code' }),
-    row(btn('vsConnect', 'Connect', 'go'), btn('vsHostCancel', 'Cancel', 'alt')),
-    field('vsHostStatus', 'p', { className: 'status' }));
+    p('Send this link to the other player. When they open it they are connected automatically. Keep this page open until they have joined.'),
+    field('vsInvite', 'textarea', { readOnly: true, spellcheck: false, placeholder: 'Preparing the link…' }),
+    row(btn('vsCopyInvite', 'Copy link', 'alt'), btn('vsShareInvite', 'Share', 'alt'), btn('vsHostCancel', 'Cancel', 'alt')),
+    field('vsHostStatus', 'p', { className: 'status' }),
+    field('vsManualHost', 'details', {}, el('summary', { textContent: 'Link not working? Pair with codes instead' }),
+      p('1. Send this code to the other player:'),
+      field('vsHostCode', 'textarea', { readOnly: true, spellcheck: false }),
+      row(btn('vsCopyHost', 'Copy', 'alt'), btn('vsShareHost', 'Share', 'alt')),
+      p('2. Paste the reply code they send back:'),
+      field('vsReply', 'textarea', { spellcheck: false, autocomplete: 'off', placeholder: 'Reply code' }),
+      row(btn('vsConnect', 'Connect', 'go'))));
 
   const joinSec = section('join',
-    p('1. Paste the code the host sent you:'),
-    field('vsHostIn', 'textarea', { spellcheck: false, autocomplete: 'off', placeholder: 'Host code' }),
+    p('Open the link the host sent you, or paste the link (or a pairing code) here:'),
+    field('vsHostIn', 'textarea', { spellcheck: false, autocomplete: 'off', placeholder: 'Link or code from the host' }),
+    el('label', { textContent: 'Your name', htmlFor: 'vsJoinName' }),
+    field('vsJoinName', 'input', { type: 'text', maxLength: 24, autocomplete: 'off', spellcheck: false }),
     row(btn('vsJoinGo', 'Join', 'go'), btn('vsJoinCancel', 'Cancel', 'alt')),
-    field('vsReplyBox', 'div', {}, p('2. Send this reply code back to the host:'),
-      field('vsReplyOut', 'textarea', { readOnly: true, spellcheck: false }), row(btn('vsCopyReply', 'Copy', 'alt'), btn('vsShareReply', 'Share', 'alt'))),
-    field('vsJoinStatus', 'p', { className: 'status' }));
+    field('vsJoinStatus', 'p', { className: 'status' }),
+    field('vsReplyBox', 'details', {}, el('summary', { textContent: 'Not connecting? Send this reply code to the host' }),
+      field('vsReplyOut', 'textarea', { readOnly: true, spellcheck: false }), row(btn('vsCopyReply', 'Copy', 'alt'), btn('vsShareReply', 'Share', 'alt'))));
   $.vsReplyBox.hidden = true;
 
   const carSelect = (id) => field(id, 'select', {});
@@ -154,7 +164,7 @@ export function initVersus({ worker, getBuildId, container = document.body }) {
   $.vsChipLeave = chip.lastChild;
 
   // ---- state -----------------------------------------------------------------------------------
-  let link = null, screen = 'home', open = false, view = null, driving = true, ready = false, role = null, buildId = 'dev';
+  let link = null, invite = null, joining = null, manualGuest = false, screen = 'home', open = false, view = null, driving = true, ready = false, role = null, buildId = 'dev';
   let lastChat = -1, lastCarKey = '', lastRulesKey = '';
 
   const post = (m, t) => worker.postMessage(m, t ?? []);
@@ -191,71 +201,158 @@ export function initVersus({ worker, getBuildId, container = document.body }) {
   }
 
   // ---- connection ------------------------------------------------------------------------------
-  function endLink() { try { link?.close(); } catch { /* ignore */ } link = null; }
+  const setStatus = (node, text, bad = false) => { node.textContent = text ?? ''; node.classList.toggle('bad', !!bad); };
+  function stopSignalling() {
+    try { invite?.done(); } catch { /* ignore */ }
+    try { joining?.stop(); } catch { /* ignore */ }
+    invite = joining = null;
+  }
+  function endLink() { stopSignalling(); try { link?.close(); } catch { /* ignore */ } link = null; }
+  // The worker keeps one online session at a time. Every pairing that ends without a connection closes it, so the next
+  // attempt can open a new one (otherwise the worker answers "already open").
+  let workerOpen = false;
+  function closeSession() { if (workerOpen) { workerOpen = false; post({ type: 'mp-close' }); } }
   function begin(which) {
-    endLink();
+    endLink(); closeSession();
     role = which;
-    const name = $.name.value.trim() || 'DRIVER';
+    const name = (which === 'guest' ? $.vsJoinName : $.name).value.trim() || 'DRIVER';
     safeSet(NAME_KEY, name);
-    post({ type: 'mp-open', role, name, buildId });
+    $.name.value = name;
+    post({ type: 'mp-open', role, name, buildId }); workerOpen = true;
     link = new MpLink({
       onState: (state, detail) => {
         if (link === null) return;
-        const status = { gathering: 'Preparing your code…', code: role === 'host' ? 'Waiting for the reply code.' : 'Send the reply code to the host. The game connects as soon as they paste it.',
-          connecting: 'Connecting…', open: 'Connected.', failed: detail || 'The connection failed.' }[state];
-        (role === 'host' ? $.vsHostStatus : $.vsJoinStatus).textContent = status ?? '';
-        (role === 'host' ? $.vsHostStatus : $.vsJoinStatus).classList.toggle('bad', state === 'failed');
+        const node = role === 'host' ? $.vsHostStatus : $.vsJoinStatus;
+        if (state === 'gathering') setStatus(node, role === 'host' ? 'Preparing your link…' : 'Preparing the connection…');
+        else if (state === 'code' && role === 'guest' && manualGuest) setStatus(node, 'Send the reply code to the host. The game connects as soon as they paste it.');
+        else if (state === 'connecting') setStatus(node, 'Connecting…');
+        else if (state === 'open') { setStatus(node, 'Connected.'); stopSignalling(); }
+        else if (state === 'failed') { setStatus(node, detail || 'The connection failed.', true); stopSignalling(); }
         if (state === 'open' || state === 'failed') post({ type: 'mp-link', state, detail });
         if (state === 'failed' && !sessionLive()) { show('ended'); $.vsEndedText.textContent = detail || 'The connection failed.'; }
       },
       onMessage: (data) => post({ type: 'mp-data', data }, data instanceof ArrayBuffer ? [data] : []),
     });
   }
+
+  // Host: one link. The pairing code goes into a private mailbox room; the guest's reply comes back the same way.
   async function startHost() {
     begin('host');
-    show('host'); $.vsHostCode.value = ''; $.vsReply.value = ''; $.vsConnect.disabled = true;
-    try {
-      const code = await link.host();
-      $.vsHostCode.value = code; $.vsConnect.disabled = false;
-    } catch (e) { fault(`Could not create a code: ${e.message}`); }
+    show('host');
+    $.vsInvite.value = ''; $.vsCopyInvite.disabled = $.vsShareInvite.disabled = true;
+    $.vsHostCode.value = ''; $.vsReply.value = ''; $.vsConnect.disabled = true; $.vsManualHost.open = false;
+    setStatus($.vsHostStatus, 'Preparing your link…');
+    const mine = link;
+    let code;
+    try { code = await mine.host(); } catch (e) { if (link === mine) fault(`Could not prepare the connection: ${e.message}`); return; }
+    if (link !== mine) return;                                  // cancelled while the connection details were being gathered
+    $.vsHostCode.value = code; $.vsConnect.disabled = false;
+    const room = newRoom(), url = signalBase ? inviteUrl(location.href, room, signalBase) : '';
+    const manualOnly = (why) => {
+      $.vsInvite.value = ''; $.vsInvite.placeholder = 'No link available'; $.vsManualHost.open = true;
+      setStatus($.vsHostStatus, `${why} Use the pairing codes below instead.`, true);
+    };
+    if (!signalBase) { manualOnly('Invitation links are switched off on this page.'); return; }
+    let mailbox;
+    try { mailbox = new Mailbox({ base: signalBase, room }); } catch (e) { manualOnly(e.message); return; }
+    invite = hostInvite({
+      mailbox, offerCode: code,
+      onAnswer: (reply) => mine.accept(reply),
+      onStatus: (s, detail) => {
+        if (link !== mine) return;
+        if (s === 'waiting') {
+          $.vsInvite.value = url; $.vsCopyInvite.disabled = $.vsShareInvite.disabled = false;
+          setStatus($.vsHostStatus, 'Link ready. Send it to the other player and keep this page open. Waiting for them…');
+        } else if (s === 'unreachable') manualOnly('The matchmaking service could not be reached.');
+        else if (s === 'answered') setStatus($.vsHostStatus, 'Found them. Connecting…');
+        else if (s === 'bad-answer') setStatus($.vsHostStatus, `A reply arrived but was not usable (${detail}). Waiting for another…`, true);
+        else if (s === 'expired') setStatus($.vsHostStatus, 'The link expired. Press Cancel and host again.', true);
+      },
+    });
   }
-  async function startJoin() {
-    begin('guest');
-    show('join'); $.vsHostIn.value = ''; $.vsReplyOut.value = ''; $.vsReplyBox.hidden = true; $.vsJoinStatus.textContent = 'Paste the host code, then press Join.'; $.vsJoinStatus.classList.remove('bad');
+
+  // Guest: the join screen takes a pasted link or code; opening a link lands here with the link filled in.
+  function startJoin(prefill = '') {
+    stopSignalling();
+    show('join');
+    $.vsHostIn.value = prefill; $.vsReplyOut.value = ''; $.vsReplyBox.hidden = true; $.vsReplyBox.open = false;
+    $.vsJoinName.value = $.name.value; $.vsJoinGo.disabled = false;
+    setStatus($.vsJoinStatus, prefill ? 'You were invited to a race. Check your name, then press Join.' : 'Paste the link or code from the host, then press Join.');
+  }
+  function joinRoom(room) {
+    begin('guest'); manualGuest = false;
+    setStatus($.vsJoinStatus, 'Looking for the invitation…'); $.vsJoinGo.disabled = true;
+    const mine = link;
+    let mailbox;
+    try {
+      if (!signalBase) throw new Error('Invitation links are switched off on this page. Ask the host for a pairing code.');
+      mailbox = new Mailbox({ base: signalBase, room });
+    } catch (e) { setStatus($.vsJoinStatus, e.message, true); $.vsJoinGo.disabled = false; return; }
+    const stopped = (text) => { closeSession(); endLink(); setStatus($.vsJoinStatus, text, true); $.vsJoinGo.disabled = false; };
+    joining = guestJoin({
+      mailbox,
+      onOffer: async (offer) => { const reply = await mine.join(offer); $.vsReplyOut.value = reply; $.vsReplyBox.hidden = false; return reply; },
+      onStatus: (s, detail) => {
+        if (link !== mine) return;
+        if (s === 'joining') setStatus($.vsJoinStatus, 'Found the invitation. Preparing the connection…');
+        else if (s === 'replied') setStatus($.vsJoinStatus, 'Reply sent. Connecting to the host…');
+        else if (s === 'unreachable') setStatus($.vsJoinStatus, 'The matchmaking service could not be reached. Ask the host for a pairing code and paste it here instead.', true);
+        else if (s === 'ended') stopped('This invitation was cancelled. Ask the host for a new link.');
+        else if (s === 'full') stopped('Someone else already joined this race. Ask the host for a new link.');
+        else if (s === 'missing') stopped('No invitation found for this link. It may have expired. Ask the host for a new link.');
+        else if (s === 'failed') stopped(`Could not join: ${detail}`);
+      },
+    });
+  }
+  async function joinWithCode(text) {
+    begin('guest'); manualGuest = true;
+    setStatus($.vsJoinStatus, ''); $.vsJoinGo.disabled = true;
+    const mine = link;
+    try {
+      const reply = await mine.join(text);
+      if (link !== mine) return;
+      $.vsReplyOut.value = reply; $.vsReplyBox.hidden = false; $.vsReplyBox.open = true;
+    } catch (e) { if (link === mine) { closeSession(); endLink(); setStatus($.vsJoinStatus, e.message, true); $.vsJoinGo.disabled = false; } }
   }
   function fault(text) {
-    post({ type: 'mp-close' }); endLink(); view = null;
+    closeSession(); endLink(); view = null;
     $.vsEndedText.textContent = text; show('ended'); refreshChrome();
   }
   $.vsHost.onclick = () => startHost();
   $.vsJoin.onclick = () => startJoin();
   $.vsConnect.onclick = async () => {
-    try { $.vsConnect.disabled = true; await link.accept($.vsReply.value); } catch (e) { $.vsHostStatus.textContent = e.message; $.vsHostStatus.classList.add('bad'); $.vsConnect.disabled = false; }
+    try { $.vsConnect.disabled = true; await link.accept($.vsReply.value); } catch (e) { setStatus($.vsHostStatus, e.message, true); $.vsConnect.disabled = false; }
   };
-  $.vsJoinGo.onclick = async () => {
-    try {
-      $.vsJoinGo.disabled = true; $.vsJoinStatus.classList.remove('bad');
-      const reply = await link.join($.vsHostIn.value);
-      $.vsReplyOut.value = reply; $.vsReplyBox.hidden = false;
-    } catch (e) { $.vsJoinStatus.textContent = e.message; $.vsJoinStatus.classList.add('bad'); $.vsJoinGo.disabled = false; }
+  $.vsJoinGo.onclick = () => {
+    const text = $.vsHostIn.value.trim();
+    if (!text) { setStatus($.vsJoinStatus, 'Paste the link or code from the host first.', true); return; }
+    const room = roomFrom(text);
+    if (room) joinRoom(room); else joinWithCode(text);
   };
-  const cancelPairing = () => { post({ type: 'mp-close' }); endLink(); view = null; $.vsJoinGo.disabled = false; show('home'); renderRecords(); refreshChrome(); };
+  const cancelPairing = () => {
+    try { invite?.cancel(); } catch { /* ignore */ }
+    closeSession(); endLink(); view = null; $.vsJoinGo.disabled = false; show('home'); renderRecords(); refreshChrome();
+  };
   $.vsHostCancel.onclick = cancelPairing; $.vsJoinCancel.onclick = cancelPairing;
+  // A host that closes the page tells the mailbox, so a late guest is not left waiting for nobody.
+  addEventListener('pagehide', () => { try { invite?.beacon(); } catch { /* ignore */ } });
 
-  async function copy(text, button) {
-    try { await navigator.clipboard.writeText(text); button.textContent = 'Copied'; }
+  async function copy(area, button, label) {
+    try { await navigator.clipboard.writeText(area.value); button.textContent = 'Copied'; }
     catch {
-      const ta = text === $.vsHostCode.value ? $.vsHostCode : $.vsReplyOut; ta.focus(); ta.select();
+      area.focus(); area.select();
       try { document.execCommand('copy'); button.textContent = 'Copied'; } catch { button.textContent = 'Select and copy'; }
     }
-    setTimeout(() => { button.textContent = 'Copy'; }, 1500);
+    setTimeout(() => { button.textContent = label; }, 1500);
   }
-  const share = async (text) => { try { await navigator.share({ text }); } catch { /* cancelled or unsupported */ } };
-  $.vsCopyHost.onclick = () => copy($.vsHostCode.value, $.vsCopyHost);
-  $.vsCopyReply.onclick = () => copy($.vsReplyOut.value, $.vsCopyReply);
-  $.vsShareHost.onclick = () => share($.vsHostCode.value);
-  $.vsShareReply.onclick = () => share($.vsReplyOut.value);
-  if (!navigator.share) { $.vsShareHost.hidden = $.vsShareReply.hidden = true; }
+  const share = async (data) => { try { await navigator.share(data); } catch { /* cancelled or unsupported */ } };
+  $.vsCopyInvite.onclick = () => copy($.vsInvite, $.vsCopyInvite, 'Copy link');
+  $.vsCopyHost.onclick = () => copy($.vsHostCode, $.vsCopyHost, 'Copy');
+  $.vsCopyReply.onclick = () => copy($.vsReplyOut, $.vsCopyReply, 'Copy');
+  $.vsShareInvite.onclick = () => share({ title: 'Initial D Arcade Stage 3', text: 'Race me in Initial D Arcade Stage 3:', url: $.vsInvite.value });
+  $.vsShareHost.onclick = () => share({ text: $.vsHostCode.value });
+  $.vsShareReply.onclick = () => share({ text: $.vsReplyOut.value });
+  if (!navigator.share) { $.vsShareInvite.hidden = $.vsShareHost.hidden = $.vsShareReply.hidden = true; }
 
   // ---- lobby controls -----------------------------------------------------------------------------
   $.vsCar.onchange = () => doAction('selectCar', Number($.vsCar.value));
@@ -344,6 +441,10 @@ export function initVersus({ worker, getBuildId, container = document.body }) {
     } else if (m.type === 'mp-records') {
       renderRecords(m);
     } else if (m.type === 'mp-ended') {
+      // The echo of our own close while no connection was made (a cancelled or failed pairing, or an earlier one arriving
+      // after a new attempt began) must not end the new attempt or replace the message the screen already shows.
+      if (m.reason === 'You left the room.' && ['home', 'host', 'join', 'ended'].includes(screen)) return;
+      workerOpen = false;
       const wasConnected = !!view;
       endLink(); view = null; window.__versus = null; lastChat = -1; lastCarKey = lastRulesKey = '';
       $.vsEndedText.textContent = m.reason || 'The session ended.';
@@ -352,13 +453,23 @@ export function initVersus({ worker, getBuildId, container = document.body }) {
     }
   }
 
+  // Opened from an invitation link (at load, or pasted into a tab that already has the game up): bring up the
+  // join screen with the link filled in. The player still confirms their name and presses Join.
+  function openInvitation() {
+    const room = roomFrom(location.hash);
+    if (!ready || !room || sessionLive() || link) return;   // not while a pairing is under way
+    try { history.replaceState(null, '', location.pathname + location.search); } catch { /* ignore */ }
+    startJoin(`${location.origin}${location.pathname}#join=${room}`); setOpen(true);
+  }
+  addEventListener('hashchange', openInvitation);
+
   show('home');
   refreshChrome();
   getBuildId().then((id) => { buildId = id; });
   return {
     onWorkerMessage,
     /** The game is up: the button may show. */
-    setReady() { ready = true; refreshChrome(); },
+    setReady() { ready = true; refreshChrome(); openInvitation(); },
     setDriving(value) { driving = !!value; refreshChrome(); },
     /** Keys typed into the panel must not reach the game. */
     capturesKeys: (event) => !!event.target?.closest?.('#versus, #vsChip'),
