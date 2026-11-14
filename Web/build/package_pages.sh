@@ -1,6 +1,7 @@
 #!/bin/bash
 # Assemble the static site for GitHub Pages (or any static host): the client, the data index and config.json.
 #   Web/build/package_pages.sh <wasm-build dir> <out dir> [--data-url <url of the Native/ folder, ends in />]
+#                                                          [--signal-url <ntfy-compatible mailbox for invitation links>]
 #
 # Default layout (this repository, deployed whole by .github/workflows/static.yml):
 #   <site>/play/        <- this script's output (committed as play/)
@@ -11,16 +12,19 @@
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"; repo="$here/../.."
 build="${1:?wasm build dir}"; out="${2:?output dir}"; shift 2
-data="../Native/"
-while [ $# -gt 0 ]; do case "$1" in --data-url) data="${2:?}"; shift 2;; *) echo "unknown option $1" >&2; exit 2;; esac; done
+data="../Native/"; signal=""
+while [ $# -gt 0 ]; do case "$1" in --data-url) data="${2:?}"; shift 2;; --signal-url) signal="${2:?}"; shift 2;; *) echo "unknown option $1" >&2; exit 2;; esac; done
 case "$data" in */) ;; *) data="$data/";; esac
 rm -rf "$out"; "$here/package_web.sh" "$build" "$out" >/dev/null
 python3 -I "$here/../tools/make_manifest.py" "$repo/Native" \
   --set "boot=$here/../tools/prefetch/boot.txt" --set "menus=$here/../tools/prefetch/menus.txt" > "$out/manifest.json"
-python3 -I - "$out" "$data" <<'PY'
+python3 -I - "$out" "$data" "$signal" <<'PY'
 import json, sys
-out, data = sys.argv[1:3]
-json.dump({"data": data, "manifest": "manifest.json"}, open(out + "/config.json", "w"), indent=2)
+out, data, signal = sys.argv[1:4]
+config = {"data": data, "manifest": "manifest.json"}
+if signal:
+    config["signal"] = signal      # otherwise the client uses its built-in default mailbox (https://ntfy.sh)
+json.dump(config, open(out + "/config.json", "w"), indent=2)
 PY
 : > "$out/.nojekyll"        # serve the files as they are (no Jekyll processing)
 echo "site in $out: $(ls "$out" | wc -l) files, $(du -sh "$out" | cut -f1); game data from $data"
