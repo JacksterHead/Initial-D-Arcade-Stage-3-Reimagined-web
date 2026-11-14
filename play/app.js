@@ -1,12 +1,15 @@
 // Main-thread shell: owns the page, forwards input to the game worker and shows load/stat overlays.
 // URL options: ?data=<base url of Native/, default game/>  ?manifest=<url>  ?scale=<factor>  ?maxlong=<px>  ?stats=1
-// Optional config.json beside index.html: {"data": <base url>, "manifest": <url>} (relative URLs resolve against the page).
+// Optional config.json beside index.html: {"data": <base url>, "manifest": <url>, "signal": <ntfy-compatible base url>}
+// (relative URLs resolve against the page). "signal" is the mailbox the one-link invites use (see mp-mailbox.js);
+// ?signal=<url> overrides it, and ?signal=off disables the link flow so only pairing codes are offered.
 // A static host (GitHub Pages) uses it to keep the client and the large game data on different origins.
 import { PAD } from './abi.js';
 import { validateDisc } from './romgate.js';
 import { initTouch } from './touch.js';
 import { AudioOutput } from './audio.js';
 import { initVersus } from './mp-ui.js';
+import { DEFAULT_SIGNAL } from './mp-mailbox.js';
 const audio = new AudioOutput();
 
 const params = new URLSearchParams(location.search);
@@ -165,6 +168,7 @@ export async function startGame() {
   };
   versus = initVersus({
     worker,
+    signal: params.get('signal') ?? config.signal ?? DEFAULT_SIGNAL,
     getBuildId: () => fetch(new URL('build.json', location.href), { cache: 'no-cache' }).then((r) => (r.ok ? r.json() : { id: 'dev' })).then((j) => String(j.id)).catch(() => 'dev'),
   });
   audio.start(worker);                         // before the core starts, so the port is in place for the first sound

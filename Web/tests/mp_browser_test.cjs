@@ -29,7 +29,7 @@ async function launch(browser, name) {
   page.on('dialog', (d) => d.accept());
   await page.route('**/romgate.js', (route) => route.fulfill({ contentType: 'text/javascript',
     body: 'export async function validateDisc(){ return { verified: true, message: "test stub", format: "stub" }; }' }));
-  await page.goto(`http://127.0.0.1:${port}/?stats=1&maxlong=${process.env.MP_MAXLONG ?? 320}`);
+  await page.goto(`http://127.0.0.1:${port}/?stats=1&signal=off&maxlong=${process.env.MP_MAXLONG ?? 320}`);   // signal=off: pairing codes only (the link flow has its own test)
   await page.setInputFiles('#files', { name: 'stub.bin', mimeType: 'application/octet-stream', buffer: Buffer.from('x') });
   return page;
 }
